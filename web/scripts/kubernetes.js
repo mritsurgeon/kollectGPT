@@ -1,16 +1,5 @@
 // kubernetes.js
 
-document.getElementById('kubernetes-button').addEventListener('click', () => {
-    showLoadingIndicator();
-    fetch('/api/switch?type=kubernetes')
-        .then(response => response.json())
-        .then(data => {
-            location.reload();
-        })
-        .catch(error => console.error('Error switching to Kubernetes:', error))
-        .finally(() => hideLoadingIndicator());
-});
-
 document.addEventListener('htmx:afterSwap', (event) => {
     if (event.detail.target.id === 'hidden-content') {
         try {

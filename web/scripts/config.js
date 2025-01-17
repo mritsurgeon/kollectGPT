@@ -89,8 +89,8 @@ async function configureKubernetes() {
         if (response.ok) {
             updateIconStatus('kubernetes-button', 'connected');
             closeConfigPanel('kubernetes-config');
-            // Refresh the data display
-            location.reload();
+            // Instead of reloading, update the UI dynamically
+            checkConnectionStatus();
         } else {
             const errorData = await response.json();
             updateIconStatus('kubernetes-button', 'disconnected');
@@ -585,3 +585,44 @@ async function disconnectPlatform(platform) {
         console.error(`Error disconnecting ${platform}:`, error);
     }
 } 
+
+// Prevent default button behavior and handle clicks properly
+document.getElementById('kubernetes-button').addEventListener('click', (e) => {
+    e.preventDefault(); // Prevent page reload
+    const k8sIcon = document.getElementById('kubernetes-button');
+    if (k8sIcon.classList.contains('connected')) {
+        confirmDisconnect('kubernetes');
+    } else {
+        showConfigPanel('kubernetes-config');
+    }
+});
+
+document.getElementById('aws-button').addEventListener('click', (e) => {
+    e.preventDefault(); // Prevent page reload
+    const awsIcon = document.getElementById('aws-button');
+    if (awsIcon.classList.contains('connected')) {
+        confirmDisconnect('aws');
+    } else {
+        showConfigPanel('aws-config');
+    }
+});
+
+document.getElementById('azure-button').addEventListener('click', (e) => {
+    e.preventDefault(); // Prevent page reload
+    const azureIcon = document.getElementById('azure-button');
+    if (azureIcon.classList.contains('connected')) {
+        confirmDisconnect('azure');
+    } else {
+        showConfigPanel('azure-config');
+    }
+});
+
+document.getElementById('veeam-button').addEventListener('click', (e) => {
+    e.preventDefault(); // Prevent page reload
+    const veeamIcon = document.getElementById('veeam-button');
+    if (veeamIcon.classList.contains('connected')) {
+        confirmDisconnect('veeam');
+    } else {
+        showConfigPanel('veeam-config');
+    }
+}); 
