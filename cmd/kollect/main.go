@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -11,15 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 
 	"github.com/michaelcade/kollect/pkg/aws"
 	"github.com/michaelcade/kollect/pkg/azure"
 	"github.com/michaelcade/kollect/pkg/kollect"
 	"github.com/michaelcade/kollect/pkg/veeam"
-	"golang.org/x/term"
 )
 
 var (
@@ -49,6 +45,12 @@ func main() {
 
 	ctx := context.Background()
 
+	// Don't fail if kubeconfig is missing
+	if *kubeconfig == "" {
+		*kubeconfig = os.Getenv("KUBECONFIG")
+	}
+
+	// Collect data based on inventory type
 	var err error
 	switch *inventoryType {
 	case "aws":
@@ -58,82 +60,63 @@ func main() {
 	case "kubernetes":
 		data, err = collectData(ctx, *storageOnly, *kubeconfig)
 	case "veeam":
-		// Load environment variables for Veeam
-		if *baseURL == "" {
-			*baseURL = os.Getenv("VBR_SERVER_URL")
+		if *baseURL == "" || *username == "" || *password == "" {
+			log.Fatal("Veeam URL, username, and password must be provided for Veeam inventory")
 		}
-		if *baseURL == "" {
-			serverAddress := promptUser("Enter VBR Server IP or DNS name: ")
-			*baseURL = fmt.Sprintf("https://%s:9419", serverAddress)
-		}
-		if *username == "" {
-			*username = getEnv("VBR_USERNAME", "Enter VBR Username: ")
-		}
-		if *password == "" {
-			*password = getSensitiveInput("Enter VBR Password: ")
-		}
-
-		// Ensure the baseURL includes the protocol scheme
-		if !strings.HasPrefix(*baseURL, "http://") && !strings.HasPrefix(*baseURL, "https://") {
-			*baseURL = "http://" + *baseURL
-		}
-
 		data, err = veeam.CollectVeeamData(ctx, *baseURL, *username, *password)
 	default:
-		log.Fatalf("Invalid inventory type: %s", *inventoryType)
+		log.Fatalf("Unsupported inventory type: %s", *inventoryType)
 	}
+
 	if err != nil {
-		log.Fatalf("Error collecting data: %v", err)
+		log.Printf("Warning: Error collecting data: %v", err)
+		data = struct{}{}
 	}
 
 	if *output != "" {
 		err = saveToFile(data, *output)
 		if err != nil {
-			log.Fatalf("Error saving data to file: %v", err)
+			log.Printf("Warning: Error saving data to file: %v", err)
+		} else {
+			fmt.Printf("Data saved to %s\n", *output)
 		}
-		fmt.Printf("Data saved to %s\n", *output)
-		return
 	}
-
-	printData(data)
 
 	if *browser {
-    startWebServer(data, true, *baseURL, *username, *password)
-   }
-}
-
-func promptUser(prompt string) string {
-	fmt.Print(prompt)
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return strings.TrimSpace(scanner.Text())
+		startWebServer(data, *baseURL, *username, *password)
+	} else {
+		printData(data)
 	}
-	return ""
-}
-
-func getSensitiveInput(prompt string) string {
-	fmt.Print(prompt)
-	bytePassword, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println() // Move to the next line after password input
-	if err != nil {
-		log.Fatalf("Error reading password: %v", err)
-	}
-	return strings.TrimSpace(string(bytePassword))
-}
-
-func getEnv(envVar, prompt string) string {
-	value := os.Getenv(envVar)
-	if value == "" {
-		value = promptUser(prompt)
-	}
-	return value
 }
 
 func collectData(ctx context.Context, storageOnly bool, kubeconfig string) (interface{}, error) {
-	if storageOnly {
-		return kollect.CollectStorageData(ctx, kubeconfig)
+	data := struct {
+		Kubernetes interface{} `json:"kubernetes,omitempty"`
+		AWS        interface{} `json:"aws,omitempty"`
+		Azure      interface{} `json:"azure,omitempty"`
+		Veeam      interface{} `json:"veeam,omitempty"`
+	}{}
+
+	// Even if kubeconfig is empty, return the empty structure
+	if kubeconfig != "" {
+		if storageOnly {
+			k8sData, err := kollect.CollectStorageData(ctx, kubeconfig)
+			if err == nil {
+				data.Kubernetes = k8sData
+			} else {
+				log.Printf("Warning: Could not collect Kubernetes data: %v", err)
+			}
+		} else {
+			k8sData, err := kollect.CollectData(ctx, kubeconfig)
+			if err == nil {
+				data.Kubernetes = k8sData
+			} else {
+				log.Printf("Warning: Could not collect Kubernetes data: %v", err)
+			}
+		}
 	}
-	return kollect.CollectData(ctx, kubeconfig)
+
+	return data, nil
 }
 
 func saveToFile(data interface{}, filename string) error {
@@ -160,16 +143,50 @@ func printData(data interface{}) {
 	fmt.Println(string(prettyData))
 }
 
-func startWebServer(data interface{}, openBrowser bool, baseURL, username, password string) {
-	// Serve the files from the web directory
-	fileServer := http.FileServer(http.Dir("web"))
+func startWebServer(data interface{}, baseURL, username, password string) {
+	// Initialize empty data structure if nil
+	if data == nil {
+		data = struct {
+			Kubernetes interface{} `json:"kubernetes,omitempty"`
+			AWS        interface{} `json:"aws,omitempty"`
+			Azure      interface{} `json:"azure,omitempty"`
+			Veeam      interface{} `json:"veeam,omitempty"`
+		}{
+			Kubernetes: nil,
+			AWS:        nil,
+			Azure:      nil,
+			Veeam:      nil,
+		}
+	}
 
-	// Serve the files
-	http.Handle("/", fileServer)
+	// Check if web directory exists
+	webDir := "web"
+	if _, err := os.Stat(webDir); os.IsNotExist(err) {
+		log.Fatalf("Error: Web directory '%s' not found", webDir)
+	}
+
+	// Create a file server with proper redirect handling
+	fs := http.FileServer(http.Dir(webDir))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Request: %s %s", r.Method, r.URL.Path)
+
+		// Handle root path directly
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
+			return
+		}
+
+		// Remove potential redirect loops by cleaning the path
+		r.URL.Path = filepath.Clean(r.URL.Path)
+		fs.ServeHTTP(w, r)
+	})
 
 	http.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		dataMutex.Lock()
 		defer dataMutex.Unlock()
+
+		log.Printf("Serving data: %+v", data)
 		err := json.NewEncoder(w).Encode(data)
 		if err != nil {
 			log.Printf("Error encoding data: %v", err)
@@ -228,9 +245,6 @@ func startWebServer(data interface{}, openBrowser bool, baseURL, username, passw
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		dataMutex.Lock()
-		data = data
-		dataMutex.Unlock()
 		w.WriteHeader(http.StatusOK)
 		err = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 		if err != nil {
@@ -238,26 +252,149 @@ func startWebServer(data interface{}, openBrowser bool, baseURL, username, passw
 		}
 	})
 
-	log.Println("Server starting on port http://localhost:8080")
-	if openBrowser {
-		// Open the browser
-		go func() {
-			var err error
-			switch runtime.GOOS {
-			case "darwin":
-				err = exec.Command("open", "http://localhost:8080").Start()
-			case "windows":
-				err = exec.Command("rundll32", "url.dll,FileProtocolHandler", "http://localhost:8080").Start()
-			default: // Linux and other Unix-like systems
-				err = exec.Command("xdg-open", "http://localhost:8080").Start()
-			}
-			if err != nil {
-				log.Printf("Warning: Failed to open browser: %v", err)
-			}
-		}()
-	}
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		status := struct {
+			AWS        bool `json:"aws"`
+			Azure      bool `json:"azure"`
+			Kubernetes bool `json:"kubernetes"`
+			Veeam      bool `json:"veeam"`
+		}{
+			AWS:        checkAWSConnection(),
+			Azure:      checkAzureConnection(),
+			Kubernetes: checkKubernetesConnection(),
+			Veeam:      checkVeeamConnection(),
+		}
+
+		json.NewEncoder(w).Encode(status)
+	})
+
+	http.HandleFunc("/api/configure/aws", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var creds struct {
+			AccessKeyID     string `json:"accessKeyId"`
+			SecretAccessKey string `json:"secretAccessKey"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Set AWS credentials
+		if err := aws.ConfigureCredentials(creds.AccessKeyID, creds.SecretAccessKey); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "AWS credentials configured successfully",
+			"status":  "success",
+		})
+	})
+
+	http.HandleFunc("/api/configure/azure", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var creds struct {
+			TenantID     string `json:"tenantId"`
+			ClientID     string `json:"clientId"`
+			ClientSecret string `json:"clientSecret"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+			http.Error(w, "Invalid credential format", http.StatusBadRequest)
+			return
+		}
+
+		if err := azure.ConfigureCredentials(creds.TenantID, creds.ClientID, creds.ClientSecret); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to configure Azure: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Azure credentials configured successfully",
+			"status":  "success",
+		})
+	})
+
+	http.HandleFunc("/api/check-azure-cli", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		cmd := exec.Command("az", "--version")
+		if err := cmd.Run(); err != nil {
+			json.NewEncoder(w).Encode(map[string]bool{"installed": false})
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]bool{"installed": true})
+	})
+
+	http.HandleFunc("/api/configure/azure-cli", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		cmd := exec.Command("az", "login")
+		output, err := cmd.CombinedOutput()
+
+		if err != nil {
+			log.Printf("Azure CLI login error: %v\nOutput: %s", err, string(output))
+			http.Error(w, "Failed to login with Azure CLI", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Azure CLI login successful",
+			"status":  "success",
+		})
+	})
+
+	log.Printf("Starting web server on http://localhost:8080")
+	log.Printf("Serving files from directory: %s", webDir)
+
+	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func checkAWSConnection() bool {
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	_, err := aws.GetCredentials(context.Background(), accessKey, secretKey)
+	return err == nil
+}
+
+func checkAzureConnection() bool {
+	tenantID := os.Getenv("AZURE_TENANT_ID")
+	clientID := os.Getenv("AZURE_CLIENT_ID")
+	clientSecret := os.Getenv("AZURE_CLIENT_SECRET")
+	_, err := azure.CheckCredentials(context.Background(), tenantID, clientID, clientSecret)
+	return err == nil
+}
+
+func checkKubernetesConnection() bool {
+	kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	_, err := kollect.CollectData(context.Background(), kubeconfig)
+	return err == nil
+}
+
+func checkVeeamConnection() bool {
+	baseURL := os.Getenv("VEEAM_URL")
+	username := os.Getenv("VEEAM_USERNAME")
+	password := os.Getenv("VEEAM_PASSWORD")
+	_, err := veeam.CollectVeeamData(context.Background(), baseURL, username, password)
+	return err == nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -30,13 +31,21 @@ type AzureData struct {
 
 func CollectAzureData(ctx context.Context) (AzureData, error) {
 	var data AzureData
+
+	// First try to get subscription ID
 	subscriptionID, err := getAzureSubscriptionID()
 	if err != nil {
-		return data, fmt.Errorf("failed to get Azure subscription ID: %v", err)
+		return data, fmt.Errorf("azure CLI not authenticated. Please run 'az login' first: %v", err)
 	}
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+
+	// Create credential options with longer timeout
+	credOptions := &azidentity.DefaultAzureCredentialOptions{
+		TenantID: os.Getenv("AZURE_TENANT_ID"),
+	}
+
+	cred, err := azidentity.NewDefaultAzureCredential(credOptions)
 	if err != nil {
-		return data, err
+		return data, fmt.Errorf("failed to create azure credentials. Please run 'az login' or set environment variables: %v", err)
 	}
 
 	// Collect VMs

@@ -85,3 +85,14 @@ function azureSQLDatabaseRowTemplate(item) {
 function azureCosmosDBRowTemplate(item) {
     return `<td>${item.name}</td><td>${item.location}</td>`;
 }
+
+function updateAzureStatus(status) {
+    const azureButton = document.getElementById('azure-button');
+    if (status) {
+        azureButton.classList.add('connected');
+        azureButton.classList.remove('disconnected');
+    } else {
+        azureButton.classList.add('disconnected');
+        azureButton.classList.remove('connected');
+    }
+}
